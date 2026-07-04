@@ -83,11 +83,8 @@ class SimulatorService extends EventEmitter {
           const payload = JSON.parse(message.toString());
           const readings = payload.sensors;
           
-          // Hardware Bypass for HMAC (since ESP32 isn't hashing yet)
-          let hmacResult = { valid: true, replayed: false, status: 'VALID', reason: 'OK' };
-          if (payload.signature !== "HARDWARE_BYPASS") {
-            hmacResult = hmacService.verify(readings, payload.signature, payload.timestamp, payload.nonce);
-          }
+          // Hardware HMAC Verification
+          const hmacResult = hmacService.verify(readings, payload.signature, payload.timestamp, payload.nonce);
           
           const analysis = anomalyDetector.analyze(readings);
           

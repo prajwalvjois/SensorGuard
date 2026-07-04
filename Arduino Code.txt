@@ -1,0 +1,191 @@
+ #include <DHT.h>
+#include <DHT_U.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include "mbedtls/md.h"
+
+#define DHTPIN 15
+#define DHTTYPE DHT22
+#define LDR_PIN 34
+#define SOUND_PIN 14
+#define BUZZER_PIN 18
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// ============================================
+// CREDENTIALS - UPDATE THESE
+// ============================================
+const char* ssid = "YOUR_WIFI_SSID";             
+const char* password = "YOUR_WIFI_PASSWORD";     
+const char* mqtt_server = "192.168.1.X"; // MUST BE YOUR LAPTOP'S LOCAL IPv4 ADDRESS
+const int mqtt_port = 1883;
+const char* SECRET_KEY = "sensorguard-hmac-secret-2025";
+// ============================================
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+DHT dht(DHTPIN, DHTTYPE);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+unsigned long lastMsg = 0;
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message;
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  if (String(topic) == "sensors/actuators" && message == "TRIGGER_BUZZER") {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(2000); 
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      client.subscribe("sensors/actuators"); 
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" trying again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+
+  dht.begin();
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Wire.begin(21, 22);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop(); // Must be called frequently to maintain connection
+
+  unsigned long now = millis();
+  if (now - lastMsg > 2000) { // Non-blocking 2-second timer
+    lastMsg = now;
+
+    // We round to 2 decimal places to ensure exact JSON string matching with V8
+    float temp = round(dht.readTemperature() * 100.0) / 100.0;
+    float hum = round(dht.readHumidity() * 100.0) / 100.0;
+    int light = analogRead(LDR_PIN);
+    int sound = analogRead(SOUND_PIN);
+
+    if (isnan(temp) || isnan(hum)) {
+      Serial.println("Failed to read from DHT sensor!");
+      return;
+    }
+
+    // --- OLED Display ---
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0,0);
+    display.println("MQTT LIVE");
+    display.setCursor(0,16);
+    display.print("T:"); display.print(temp,1);
+    display.setCursor(64,16);
+    display.print("H:"); display.print(hum,0);
+    display.setCursor(0,32);
+    display.print("L:"); display.print(light);
+    display.setCursor(0,48);
+    display.print("S:"); display.print(sound);
+    display.display();
+
+    // --- HMAC-SHA256 Cryptographic Signature ---
+    unsigned long timestamp = millis();
+    long nonce = random(0, 1000000);
+
+    // Create the exact message string Node.js will expect to hash
+    StaticJsonDocument<512> hashDoc;
+    hashDoc["temperature"]["value"] = temp;
+    hashDoc["temperature"]["unit"] = "°C";
+    hashDoc["humidity"]["value"] = hum;
+    hashDoc["humidity"]["unit"] = "%";
+    hashDoc["light"]["value"] = light;
+    hashDoc["light"]["unit"] = "lux";
+    hashDoc["sound"]["value"] = sound;
+    hashDoc["sound"]["unit"] = "dB";
+    hashDoc["timestamp"] = timestamp;
+    hashDoc["nonce"] = nonce;
+
+    char hashPayload[512];
+    serializeJson(hashDoc, hashPayload);
+
+    byte hmacResult[32];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
+    mbedtls_md_hmac_starts(&ctx, (const unsigned char *) SECRET_KEY, strlen(SECRET_KEY));
+    mbedtls_md_hmac_update(&ctx, (const unsigned char *) hashPayload, strlen(hashPayload));
+    mbedtls_md_hmac_finish(&ctx, hmacResult);
+    mbedtls_md_free(&ctx);
+
+    char hexSignature[65];
+    for (int i = 0; i < 32; i++) {
+      sprintf(&hexSignature[i * 2], "%02x", hmacResult[i]);
+    }
+
+    // --- C-Style Memory Allocation for JSON ---
+    StaticJsonDocument<512> doc; 
+    JsonObject sensors = doc.createNestedObject("sensors");
+    
+    JsonObject tObj = sensors.createNestedObject("temperature");
+    tObj["value"] = temp; tObj["unit"] = "°C";
+
+    JsonObject hObj = sensors.createNestedObject("humidity");
+    hObj["value"] = hum; hObj["unit"] = "%";
+
+    JsonObject lObj = sensors.createNestedObject("light");
+    lObj["value"] = light; lObj["unit"] = "lux";
+
+    JsonObject sObj = sensors.createNestedObject("sound");
+    sObj["value"] = sound; sObj["unit"] = "dB";
+
+    doc["signature"] = hexSignature; 
+    doc["timestamp"] = timestamp;
+    doc["nonce"] = nonce;
+
+    char jsonBuffer[512];
+    serializeJson(doc, jsonBuffer);
+    
+    client.publish("sensors/telemetry", jsonBuffer);
+    Serial.println(jsonBuffer); // Debug print to ensure format is correct
+  }
+} 
