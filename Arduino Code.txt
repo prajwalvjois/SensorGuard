@@ -11,7 +11,7 @@
 #define DHTPIN 15
 #define DHTTYPE DHT22
 #define LDR_PIN 34
-#define SOUND_PIN 14
+#define SOUND_PIN 35
 #define BUZZER_PIN 18
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -19,9 +19,9 @@
 // ============================================
 // CREDENTIALS - UPDATE THESE
 // ============================================
-const char* ssid = "YOUR_WIFI_SSID";             
-const char* password = "YOUR_WIFI_PASSWORD";     
-const char* mqtt_server = "192.168.1.X"; // MUST BE YOUR LAPTOP'S LOCAL IPv4 ADDRESS
+const char* ssid = "Shaurya's OnePlus 10R 5G";             
+const char* password = "tttd1786";     
+const char* mqtt_server = "172.27.223.191"; // MUST BE YOUR LAPTOP'S LOCAL IPv4 ADDRESS
 const int mqtt_port = 1883;
 const char* SECRET_KEY = "sensorguard-hmac-secret-2025";
 // ============================================
@@ -39,9 +39,16 @@ void setup_wifi() {
   Serial.print("Connecting to ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
+  int count = 0;
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
+    count++;
+    if(count % 10 == 0){
+      Serial.print(" Status=");
+      Serial.println(WiFi.status());
+    }
   }
   Serial.println("\nWiFi connected. IP: ");
   Serial.println(WiFi.localIP());
@@ -80,6 +87,7 @@ void setup() {
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
+  client.setBufferSize(512);
 
   dht.begin();
   pinMode(BUZZER_PIN, OUTPUT);
@@ -103,7 +111,7 @@ void loop() {
     // We round to 2 decimal places to ensure exact JSON string matching with V8
     float temp = round(dht.readTemperature() * 100.0) / 100.0;
     float hum = round(dht.readHumidity() * 100.0) / 100.0;
-    int light = analogRead(LDR_PIN);
+    int light = 4095 - analogRead(LDR_PIN);
     int sound = analogRead(SOUND_PIN);
 
     if (isnan(temp) || isnan(hum)) {
